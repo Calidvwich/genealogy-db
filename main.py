@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from typing import Optional
-import base64, os
+import base64, os, time, tracemalloc
 from login import router as auth_router
 from register import router as register_router
 from permissions import router as perm_router, check_edit_permission
@@ -64,6 +64,8 @@ async def index(request: Request):
                 #adminContent {{ display: {admin_display}; height: 100vh; flex-direction: column; }}
 
                 .navbar {{ background: white; padding: 0 24px; height: 60px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }}
+                .mode-switch {{ display: flex; align-items: center; gap: 6px; font-size: 13px; color: #475569; margin-right: 15px; border: 1px solid #e2e8f0; padding: 4px 10px; border-radius: 20px; background: #f8fafc; cursor: pointer; user-select: none; }}
+                .mode-switch input {{ margin: 0; width: auto; cursor: pointer; }}
                 .main-container {{ flex: 1; display: flex; padding: 15px; gap: 15px; overflow: hidden; box-sizing: border-box; }}
                 .card {{ background: white; border-radius: 12px; padding: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); box-sizing: border-box; }}
                 .side-panel {{ width: 360px; display: flex; flex-direction: column; gap: 15px; height: 100%; overflow: hidden; }}
@@ -147,6 +149,10 @@ async def index(request: Request):
                     <div style="font-weight:bold; color:var(--primary); font-size: 1.2rem;">武大族谱系统 - 管理后台</div>
                     <div style="color: #64748b; font-size: 13px;">计算机学院 弘毅班 | 已登录</div>
                     <div style="display:flex; gap:8px; align-items:center;">
+                        <label class="mode-switch" title="开启后显示SQL执行性能指标">
+                            <input type="checkbox" id="perfModeToggle">
+                            <span>性能模式</span>
+                        </label>
                         <button id="btn-collab-current" onclick="openCurrentClanCollab()" style="display:none; background:#7c3aed; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px; padding:4px 10px;">👥 管理协作者</button>
                         <button onclick="toggleClanView()" style="background:var(--primary); color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px; padding:4px 10px;">📚 我的族谱</button>
                         <button onclick="openQueryModal()" style="background:#0891b2; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px; padding:4px 10px;">📊 统计查询</button>
@@ -180,7 +186,9 @@ async def index(request: Request):
                                     <div style="display:flex; gap:8px">
                                         <input type="text" id="nameInput" placeholder="输入姓名查询..." style="margin:0">
                                         <button class="btn-primary" onclick="search()">查询</button>
+                                        <button class="btn-primary" style="background:var(--success);" onclick="openModal('addMemberModal')">添加</button>
                                     </div>
+                                    <div id="search-msg" style="font-size:12px; min-height:18px; color:#475569; margin-top:6px;"></div>
                                     <div class="search-results" id="search-results"></div>
                                 </div>
 
@@ -197,7 +205,10 @@ async def index(request: Request):
                             <div id="clan-view" style="display:none; flex-direction:column; flex:1; overflow:hidden;">
                                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                                     <span style="font-size:13px; font-weight:600; color:#1e293b;">我创建/协作的族谱</span>
-                                    <button onclick="toggleClanView()" style="background:none; border:none; cursor:pointer; color:#94a3b8; font-size:18px; padding:0;">✕</button>
+                                    <div>
+                                        <button onclick="openModal('addGenealogyModal')" style="background:var(--success); color:white; border:none; border-radius:4px; padding:2px 6px; font-size:12px; cursor:pointer;">新建</button>
+                                        <button onclick="toggleClanView()" style="background:none; border:none; cursor:pointer; color:#94a3b8; font-size:18px; padding:0; margin-left:4px;">✕</button>
+                                    </div>
                                 </div>
                                 <div id="clan-list" style="overflow-y:auto; flex:1;"></div>
                             </div>
@@ -351,6 +362,59 @@ async def index(request: Request):
                 </div>
             </div>
 
+            <!-- ⑥ 新建族谱模态框 -->
+            <div class="modal-overlay" id="addGenealogyModal">
+                <div class="modal-box">
+                    <h3>📚 新建族谱</h3>
+                    <label>族谱标题</label>
+                    <input type="text" id="add_gen_title" placeholder="如：李氏家谱">
+                    <label>家族姓氏</label>
+                    <input type="text" id="add_gen_surname" placeholder="如：李">
+                    <div id="addGenMsg" style="font-size:13px; min-height:18px; color:var(--danger);"></div>
+                    <div class="modal-footer">
+                        <button class="btn-cancel" onclick="closeModal('addGenealogyModal')">取消</button>
+                        <button class="btn-primary" onclick="submitAddGenealogy()">确认创建</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ⑦ 添加成员模态框 -->
+            <div class="modal-overlay" id="addMemberModal">
+                <div class="modal-box" style="max-height:85vh; overflow-y:auto;">
+                    <h3>👤 添加族谱成员</h3>
+                    <label>选择族谱</label>
+                    <select id="add_member_clan">
+                        <option value="">加载中...</option>
+                    </select>
+                    <label>姓名</label>
+                    <input type="text" id="add_member_name" placeholder="成员姓名">
+                    <label>性别</label>
+                    <select id="add_member_gender">
+                        <option value="M">男</option>
+                        <option value="F">女</option>
+                    </select>
+                    <label>出生年份</label>
+                    <input type="number" id="add_member_birth" placeholder="如 1980">
+                    <label>去世年份（未去世留空）</label>
+                    <input type="number" id="add_member_death" placeholder="如 2050">
+                    <label>简介</label>
+                    <input type="text" id="add_member_bio" placeholder="简短描述">
+                    <div style="border-top:1px solid #f1f5f9; margin:10px 0; padding-top:10px;">
+                        <span style="font-size:12px; font-weight:600; color:#1e293b;">亲属关系 (选填，必须是同族谱名字且唯一)</span>
+                        <label>父亲姓名</label>
+                        <input type="text" id="add_member_father" placeholder="可留空">
+                        <label>母亲姓名</label>
+                        <input type="text" id="add_member_mother" placeholder="可留空">
+                    </div>
+
+                    <div id="addMemberMsg" style="font-size:13px; min-height:18px; color:var(--danger);"></div>
+                    <div class="modal-footer">
+                        <button class="btn-cancel" onclick="closeModal('addMemberModal')">取消</button>
+                        <button class="btn-primary" onclick="submitAddMember()">确认添加</button>
+                    </div>
+                </div>
+            </div>
+
             <script>
                 let myChart, pieChart;
                 let DEFAULT_PIC = '';  // 启动时从 /api/default_pic 加载
@@ -456,25 +520,56 @@ async def index(request: Request):
                 }}
 
                 async function search() {{
-                    const name = document.getElementById('nameInput').value;
-                    const res = await fetch(`/members/search?name=${{encodeURIComponent(name)}}`);
-                    const data = await res.json();
-                    let html = '';
-                    data.forEach(m => {{
-                        html += `
-                        <div class="member-item">
-                            <div class="member-item-left" onclick="loadTree(${{m.id}}, ${{m.clan_id}})">
-                                <strong>${{m.name}}</strong>
-                                <small style="margin-left:8px; color:#94a3b8;">第${{m.gen}}代</small>
-                            </div>
-                            <div style="display:flex;gap:4px;align-items:center;" id="actions-${{m.id}}">
-                                <!-- 按钮由 loadPermBadge 填充 -->
-                            </div>
-                        </div>`;
-                    }});
-                    document.getElementById('search-results').innerHTML = html;
-                    // 异步加载每个成员的权限标签/按钮
-                    data.forEach(m => loadPermBadge(m.id, m.clan_id));
+                    const name = document.getElementById('nameInput').value.trim();
+                    const msgEl = document.getElementById('search-msg');
+                    const resultsEl = document.getElementById('search-results');
+                    
+                    if (!name) {{
+                        msgEl.style.color = 'var(--danger)';
+                        msgEl.innerText = '请输入要查询的姓名';
+                        resultsEl.innerHTML = '';
+                        return;
+                    }}
+                    
+                    msgEl.style.color = '#94a3b8';
+                    msgEl.innerText = '查询中请稍后...';
+                    resultsEl.innerHTML = '';
+
+                    try {{
+                        const isPerf = document.getElementById('perfModeToggle').checked;
+                        const res = await fetch(`/members/search?name=${{encodeURIComponent(name)}}&perf_mode=${{isPerf ? 'true' : 'false'}}`);
+                        const data = await res.json();
+                        
+                        if (data && data.length > 0) {{
+                            msgEl.style.color = 'var(--success)';
+                            msgEl.innerText = '查询成功';
+                            if (data[0].perf_log) {{
+                                msgEl.innerText = `查询成功 | ${{data[0].perf_log}}`;
+                            }}
+                            let html = '';
+                            data.forEach(m => {{
+                                html += `
+                                <div class="member-item">
+                                    <div class="member-item-left" onclick="loadTree(${{m.id}}, ${{m.clan_id}})">
+                                        <strong>${{m.name}}</strong>
+                                        <small style="margin-left:8px; color:#94a3b8;">第${{m.gen}}代</small>
+                                    </div>
+                                    <div style="display:flex;gap:4px;align-items:center;" id="actions-${{m.id}}">
+                                        <!-- 按钮由 loadPermBadge 填充 -->
+                                    </div>
+                                </div>`;
+                            }});
+                            resultsEl.innerHTML = html;
+                            // 异步加载每个成员的权限标签/按钮
+                            data.forEach(m => loadPermBadge(m.id, m.clan_id));
+                        }} else {{
+                            msgEl.style.color = 'var(--danger)';
+                            msgEl.innerText = '查询失败，未检索到对象';
+                        }}
+                    }} catch (e) {{
+                        msgEl.style.color = 'var(--danger)';
+                        msgEl.innerText = '查询失败，网络或服务器异常';
+                    }}
                 }}
 
                 // 为搜索结果中的每条成员加载权限状态
@@ -613,6 +708,11 @@ async def index(request: Request):
                     formData.append('bio', document.getElementById('edit_bio').value);
                     const res = await fetch(`/members/${{memberId}}/update`, {{ method: 'POST', body: formData }});
                     const data = await res.json();
+                    if (res.status === 401) {{
+                        alert('登录已过期或未登录，请重新登录');
+                        logout();
+                        return;
+                    }}
                     if (res.ok) {{
                         closeModal('editModal');
                         search(); // 刷新搜索结果
@@ -837,12 +937,15 @@ async def index(request: Request):
                     let url = `/api/relationship?name_a=${{encodeURIComponent(nameA)}}&name_b=${{encodeURIComponent(nameB)}}`;
                     if (idA) url += `&id_a=${{idA}}`;
                     if (idB) url += `&id_b=${{idB}}`;
+                    
+                    const isPerf = document.getElementById('perfModeToggle').checked;
+                    url += '&perf_mode=' + (isPerf ? 'true' : 'false');
 
                     const res = await fetch(url);
                     const data = await res.json();
 
                     msgEl.style.color = data.found ? 'var(--success)' : 'var(--danger)';
-                    msgEl.innerText = data.message;
+                    msgEl.innerText = data.perf_log ? `${{data.message}} | ${{data.perf_log}}` : data.message;
 
                     let candidateHtml = '';
                     if (data.candidates_a && data.candidates_a.length > 1) {{
@@ -1060,8 +1163,80 @@ async def index(request: Request):
                 }}
 
                 // ── 工具 ─────────────────────────────────────────
-                function openModal(id) {{ document.getElementById(id).classList.add('active'); }}
+                function openModal(id) {{ 
+                    document.getElementById(id).classList.add('active'); 
+                    if(id === 'addMemberModal') {{
+                         // 加载可以编辑的族谱到下拉框
+                         loadAddMemberClanOptions();
+                    }}
+                }}
                 function closeModal(id) {{ document.getElementById(id).classList.remove('active'); }}
+
+                async function loadAddMemberClanOptions() {{
+                    const res = await fetch('/api/genealogies');
+                    const clans = await res.json();
+                    const sel = document.getElementById('add_member_clan');
+                    sel.innerHTML = clans.map(c => `<option value="${{c.clan_id}}">${{c.title}}</option>`).join('');
+                }}
+
+                async function submitAddGenealogy() {{
+                    const title = document.getElementById('add_gen_title').value.trim();
+                    const surname = document.getElementById('add_gen_surname').value.trim();
+                    const msgEl = document.getElementById('addGenMsg');
+                    if (!title) {{ msgEl.innerText = "请输入族谱标题"; return; }}
+                    
+                    const fd = new FormData();
+                    fd.append('title', title);
+                    fd.append('surname', surname);
+
+                    try {{
+                        const res = await fetch('/api/genealogies', {{ method: 'POST', body: fd }});
+                        const data = await res.json();
+                        if (res.ok) {{
+                            closeModal('addGenealogyModal');
+                            document.getElementById('add_gen_title').value = '';
+                            document.getElementById('add_gen_surname').value = '';
+                            if (clanViewOpen) loadClanList();
+                        }} else {{
+                            msgEl.innerText = data.detail || '创建失败';
+                        }}
+                    }} catch (e) {{ msgEl.innerText = "网络错误"; }}
+                }}
+
+                async function submitAddMember() {{
+                    const clan_id = document.getElementById('add_member_clan').value;
+                    const name = document.getElementById('add_member_name').value.trim();
+                    const msgEl = document.getElementById('addMemberMsg');
+                    if (!clan_id) {{ msgEl.innerText = "请选择族谱"; return; }}
+                    if (!name) {{ msgEl.innerText = "请输入成员姓名"; return; }}
+
+                    const fd = new FormData();
+                    fd.append('clan_id', clan_id);
+                    fd.append('name', name);
+                    fd.append('gender', document.getElementById('add_member_gender').value);
+                    fd.append('birth_year', document.getElementById('add_member_birth').value);
+                    fd.append('death_year', document.getElementById('add_member_death').value);
+                    fd.append('bio', document.getElementById('add_member_bio').value);
+                    fd.append('father_name', document.getElementById('add_member_father').value.trim());
+                    fd.append('mother_name', document.getElementById('add_member_mother').value.trim());
+
+                    try {{
+                        const res = await fetch('/members/add', {{ method: 'POST', body: fd }});
+                        const data = await res.json();
+                        if (res.ok) {{
+                            closeModal('addMemberModal');
+                            document.getElementById('add_member_name').value = '';
+                            document.getElementById('add_member_birth').value = '';
+                            document.getElementById('add_member_death').value = '';
+                            document.getElementById('add_member_bio').value = '';
+                            document.getElementById('add_member_father').value = '';
+                            document.getElementById('add_member_mother').value = '';
+                            search();
+                        }} else {{
+                            msgEl.innerText = data.detail || '添加失败';
+                        }}
+                    }} catch (e) {{ msgEl.innerText = "网络错误"; }}
+                }}
 
                 function togglePassword() {{
                     const p = document.getElementById('login_pwd');
@@ -1159,9 +1334,16 @@ def get_genealogies(request: Request):
 # 成员查询（新增 clan_id 返回，供前端权限检查用）
 # ---------------------------------------------------------
 @app.get("/members/search")
-def search_members(name: str):
+def search_members(name: str, perf_mode: str = "true"):
     db = SessionLocal()
+    tracemalloc.start()
+    m0, _ = tracemalloc.get_traced_memory()
+    start_time = time.perf_counter()
     try:
+        if perf_mode.lower() == "false":
+            db.execute(text("SET enable_indexscan = off;"))
+            db.execute(text("SET enable_bitmapscan = off;"))
+
         results = db.execute(
             text("""
                 SELECT member_id, clan_id, name, generation_num FROM members
@@ -1174,9 +1356,21 @@ def search_members(name: str):
             """),
             {"n": f"%{name}%", "exact": name}
         ).all()
-        return [{"id": r[0], "clan_id": r[1], "name": r[2], "gen": r[3]} for r in results]
+        data = [{"id": r[0], "clan_id": r[1], "name": r[2], "gen": r[3]} for r in results]
     finally:
+        if perf_mode.lower() == "false":
+            db.execute(text("SET enable_indexscan = on;"))
+            db.execute(text("SET enable_bitmapscan = on;"))
+        end_time = time.perf_counter()
+        m1, _ = tracemalloc.get_traced_memory()
         db.close()
+        
+    time_ms = (end_time - start_time) * 1000
+    mem_kb = max(0, (m1 - m0) / 1024)
+    if data:
+        data[0]["perf_log"] = f"耗时: {time_ms:.2f}ms | 内存: {mem_kb:.2f}KB"
+        
+    return data
 
 
 # ---------------------------------------------------------
@@ -1192,7 +1386,10 @@ def get_member_detail(member_id: int):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="成员不存在")
-        return dict(row._mapping)
+        res = dict(row._mapping)
+        if not res.get("id_pic"):
+            res["id_pic"] = DEFAULT_PIC_DATA_URI
+        return res
     finally:
         db.close()
 
@@ -1233,6 +1430,13 @@ def update_member(
     current_user = request.cookies.get("session_user")
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
+
+    if birth_year and death_year:
+        try:
+            if int(birth_year) >= int(death_year):
+                raise HTTPException(status_code=400, detail="出生年份必须早于死亡年份")
+        except ValueError:
+            pass
 
     db = SessionLocal()
     try:
@@ -1282,32 +1486,33 @@ def get_relationship(
     name_a: str,
     name_b: str,
     id_a: int = None,
-    id_b: int = None
+    id_b: int = None,
+    perf_mode: str = "true"
 ):
     db = SessionLocal()
+    tracemalloc.start()
+    m0, _ = tracemalloc.get_traced_memory()
+    start_time = time.perf_counter()
     try:
-        # 若前端已精确指定 member_id，直接用；否则按姓名查
-        if id_a and id_b:
-            from search import _label_path, _bfs_relationship
-            path = _bfs_relationship(db, id_a, id_b)
-            if path:
-                labeled = _label_path(db, path)
-                return {
-                    "found": True,
-                    "message": f"存在亲缘关系，相距 {len(path)-1} 代",
-                    "path": labeled,
-                    "candidates_a": [],
-                    "candidates_b": [],
-                }
-            else:
-                return {
-                    "found": False,
-                    "message": "两人之间未发现亲缘关系（或超出可查范围）",
-                    "path": [], "candidates_a": [], "candidates_b": [],
-                }
-        return find_relationship(db, name_a, name_b)
+        if perf_mode.lower() == "false":
+            db.execute(text("SET enable_indexscan = off;"))
+            db.execute(text("SET enable_bitmapscan = off;"))
+
+        res = find_relationship(db, name_a, name_b, id_a, id_b)
     finally:
+        if perf_mode.lower() == "false":
+            db.execute(text("SET enable_indexscan = on;"))
+            db.execute(text("SET enable_bitmapscan = on;"))
+        end_time = time.perf_counter()
+        m1, _ = tracemalloc.get_traced_memory()
         db.close()
+        
+    time_ms = (end_time - start_time) * 1000
+    mem_kb = max(0, (m1 - m0) / 1024)
+    res["time_ms"] = time_ms
+    res["mem_kb"] = mem_kb
+    res["perf_log"] = f"耗时: {time_ms:.2f}ms | 内存: {mem_kb:.2f}KB"
+    return res
 
 
 # ---------------------------------------------------------
@@ -1541,6 +1746,107 @@ def delete_marriage(marriage_id: int, request: Request):
 
 
 # =============================================================
+# 新增族谱与成员接口
+# =============================================================
+
+@app.post("/api/genealogies")
+def add_genealogy(
+    request: Request,
+    title: str = Form(...),
+    surname: str = Form("")
+):
+    current_user = request.cookies.get("session_user")
+    if not current_user:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    db = SessionLocal()
+    try:
+        user = db.execute(text("SELECT id FROM users WHERE user_id = :uid"), {"uid": current_user}).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+            
+        next_id_row = db.execute(text("SELECT COALESCE(MAX(clan_id), 0) + 1 FROM genealogies")).fetchone()
+        new_id = next_id_row[0]
+
+        db.execute(text("""
+            INSERT INTO genealogies (clan_id, title, surname, creator_id)
+            VALUES (:cid, :t, :s, :uid)
+        """), {"cid": new_id, "t": title, "s": surname, "uid": user[0]})
+        db.commit()
+        return {"message": "新建族谱成功", "clan_id": new_id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/members/add")
+def add_member(
+    request: Request,
+    clan_id: int = Form(...),
+    name: str = Form(...),
+    gender: str = Form(...),
+    birth_year: str = Form(""),
+    death_year: str = Form(""),
+    bio: str = Form(""),
+    father_name: str = Form(""),
+    mother_name: str = Form("")
+):
+    current_user = request.cookies.get("session_user")
+    if not current_user:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    if birth_year and death_year:
+        try:
+            if int(birth_year) >= int(death_year):
+                raise HTTPException(status_code=400, detail="出生年份必须早于死亡年份")
+        except ValueError:
+            pass
+
+    db = SessionLocal()
+    try:
+        if not check_edit_permission(db, clan_id, current_user):
+            raise HTTPException(status_code=403, detail="无编辑权限")
+
+        father_id = None
+        mother_id = None
+        generation_num = 1
+        
+        if father_name:
+            fs = db.execute(text("SELECT member_id, generation_num FROM members WHERE name = :n AND clan_id = :c AND gender = 'M'"), {"n": father_name, "c": clan_id}).fetchall()
+            if fs:
+                father_id = fs[0][0]
+                generation_num = max(generation_num, (fs[0][1] or 0) + 1)
+        if mother_name:
+            ms = db.execute(text("SELECT member_id, generation_num FROM members WHERE name = :n AND clan_id = :c AND gender = 'F'"), {"n": mother_name, "c": clan_id}).fetchall()
+            if ms:
+                mother_id = ms[0][0]
+                generation_num = max(generation_num, (ms[0][1] or 0) + 1)
+
+        by = int(birth_year) if birth_year.strip() else None
+        dy = int(death_year) if death_year.strip() else None
+
+        next_id_row = db.execute(text("SELECT COALESCE(MAX(member_id), 0) + 1 FROM members")).fetchone()
+        new_id = next_id_row[0]
+
+        db.execute(text("""
+            INSERT INTO members (member_id, clan_id, name, gender, birth_year, death_year, bio, father_id, mother_id, generation_num)
+            VALUES (:mid, :cid, :n, :g, :by, :dy, :bio, :fid, :mid_parent, :gen)
+        """), {
+            "mid": new_id, "cid": clan_id, "n": name, "g": gender, "by": by, "dy": dy, "bio": bio, "fid": father_id, "mid_parent": mother_id, "gen": generation_num
+        })
+        db.commit()
+        return {"message": "添加成员成功"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+
+# =============================================================
 # 统计查询接口
 # =============================================================
 
@@ -1557,7 +1863,7 @@ def get_all_genealogies():
 
 @app.get("/api/query/spouse_children")
 def query_spouse_children(name: str):
-    """查询某成员的所有配偶（来自 marriages 表）和子女"""
+    """查询某成员的所有配偶（通过共同子女推导）和子女"""
     db = SessionLocal()
     try:
         members = db.execute(
@@ -1569,17 +1875,30 @@ def query_spouse_children(name: str):
 
         all_spouses, all_children = [], []
         for member_id, clan_id in members:
-            # 配偶（从 marriages 表）
+            # 配偶（通过共同出现的儿女的父母字段推导）
             spouses = db.execute(text("""
-                SELECT m.name, m.gender, m.birth_year,
-                       mg.marry_year, mg.divorce_year
-                FROM marriages mg
-                JOIN members m ON m.member_id =
-                    CASE WHEN mg.spouse_a_id = :mid THEN mg.spouse_b_id ELSE mg.spouse_a_id END
-                WHERE mg.spouse_a_id = :mid OR mg.spouse_b_id = :mid
-                ORDER BY mg.marry_year NULLS LAST
+                WITH target AS (
+                    SELECT :mid::BIGINT AS mid
+                ),
+                children_of_target AS (
+                    SELECT member_id, father_id, mother_id
+                    FROM members
+                    WHERE father_id = (SELECT mid FROM target)
+                       OR mother_id = (SELECT mid FROM target)
+                )
+                SELECT DISTINCT
+                    s.member_id,
+                    s.name AS spouse_name,
+                    s.gender,
+                    s.birth_year
+                FROM children_of_target c
+                JOIN members s ON s.member_id = CASE
+                    WHEN c.father_id = (SELECT mid FROM target) THEN c.mother_id
+                    ELSE c.father_id
+                END
+                ORDER BY s.member_id
             """), {"mid": member_id}).fetchall()
-            all_spouses.extend([dict(r._mapping) for r in spouses])
+            all_spouses.extend([{"name": r[1], "gender": r[2], "birth_year": r[3]} for r in spouses])
 
             # 子女
             children = db.execute(text("""
@@ -1650,28 +1969,33 @@ def query_longevity(clan_id: int):
 
 @app.get("/api/query/singles")
 def query_singles(clan_id: int = None):
-    """查询年龄超过 50 岁的男性单身成员（无 marriages 记录）"""
+    """查询年龄超过 50 岁的男性单身成员（无子女明确指向配偶记录）"""
     db = SessionLocal()
     try:
         clan_filter = "AND m.clan_id = :cid" if clan_id else ""
         params = {"cid": clan_id} if clan_id else {}
         rows = db.execute(text(f"""
             SELECT m.member_id, m.name, m.birth_year,
-                   EXTRACT(YEAR FROM CURRENT_DATE)::INT - m.birth_year AS estimated_age,
+                   COALESCE(m.death_year, EXTRACT(YEAR FROM CURRENT_DATE)::INT) - m.birth_year AS estimated_age,
                    g.title AS clan_title
             FROM members m
             JOIN genealogies g ON g.clan_id = m.clan_id
             WHERE m.gender = 'M'
-              AND m.death_year IS NULL
               AND m.birth_year IS NOT NULL
-              AND EXTRACT(YEAR FROM CURRENT_DATE)::INT - m.birth_year > 50
+              AND COALESCE(m.death_year, EXTRACT(YEAR FROM CURRENT_DATE)::INT) - m.birth_year > 50
               {clan_filter}
               AND NOT EXISTS (
-                  SELECT 1 FROM marriages mg
-                  WHERE (mg.spouse_a_id = m.member_id OR mg.spouse_b_id = m.member_id)
-                    AND mg.divorce_year IS NULL
+                  SELECT 1 FROM members c
+                  WHERE c.father_id = m.member_id
+                    AND c.mother_id IS NOT NULL
               )
-            ORDER BY m.birth_year ASC
+              AND NOT EXISTS (
+                  SELECT 1 FROM members c
+                  WHERE c.mother_id = m.member_id
+                    AND c.father_id IS NOT NULL
+              )
+            ORDER BY estimated_age DESC
+            LIMIT 50
         """), params).fetchall()
         return [dict(r._mapping) for r in rows]
     finally:

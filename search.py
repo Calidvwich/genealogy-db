@@ -12,55 +12,137 @@ from sqlalchemy import text
 from collections import deque
 
 
-# ── 内存图构建 ───────────────────────────────────────────
-def _build_graph(db, clan_id: int) -> dict[int, list[int]]:
-    """
-    一次性从数据库读取指定族谱所有成员的父子关系，
-    构建无向邻接表 {member_id: [neighbor_id, ...]}。
-    """
-    rows = db.execute(
-        text("SELECT member_id, father_id, mother_id FROM members WHERE clan_id = :cid"),
-        {"cid": clan_id}
-    ).fetchall()
-
-    graph: dict[int, list[int]] = {}
-    for member_id, father_id, mother_id in rows:
-        if member_id not in graph:
-            graph[member_id] = []
-        for parent_id in (father_id, mother_id):
-            if parent_id is not None:
-                graph[member_id].append(parent_id)
-                if parent_id not in graph:
-                    graph[parent_id] = []
-                graph[parent_id].append(member_id)
-    return graph
-
-
-# ── 内存 BFS ─────────────────────────────────────────────
-def _bfs_in_graph(graph: dict, id_a: int, id_b: int) -> list[int] | None:
-    """在内存邻接表上做 BFS，返回最短路径节点列表，找不到返回 None。"""
+# ── 双向数据库 BFS (消除全表内存加载) ────────────────────────────
+def _bfs_in_db(db, id_a: int, id_b: int, max_depth: int = 15) -> list[int] | None:
+    """直接使用数据库查询做双向 BFS，避免将几十万数据的全族谱加载进内存。"""
     if id_a == id_b:
         return [id_a]
-    if id_a not in graph or id_b not in graph:
+
+    # visited 记录 {节点: (父节点, 深度)}
+    visited_a = {id_a: (None, 0)}
+    visited_b = {id_b: (None, 0)}
+
+    frontier_a = {id_a}
+    frontier_b = {id_b}
+
+    intersect_node = None
+
+    for depth in range(max_depth):
+        if not frontier_a and not frontier_b:
+            break
+
+        # ================== 扩展 A 侧 ==================
+        if frontier_a:
+            next_frontier_a = set()
+            # 批量获取 A 侧前沿节点的所有邻居 (父母、子女)
+            if frontier_a:
+                query_ids = tuple(frontier_a)
+                # 寻找他们的父母 (father_id, mother_id)
+                rows = db.execute(
+                    text(f"SELECT member_id, father_id, mother_id FROM members WHERE member_id IN :q_ids"),
+                    {"q_ids": query_ids}
+                ).fetchall()
+                
+                # 寻找他们的子女 (作为 father 或 mother 被引用)
+                children_rows = db.execute(
+                    text(f"SELECT member_id, father_id, mother_id FROM members WHERE father_id IN :q_ids OR mother_id IN :q_ids"),
+                    {"q_ids": query_ids}
+                ).fetchall()
+                
+                # 收集邻居关系
+                # 对于查询父母的行，邻居是 father_id, mother_id
+                for r in rows:
+                    m_id, f_id, mo_id = r
+                    for par in (f_id, mo_id):
+                        if par is not None:
+                            if par not in visited_a:
+                                visited_a[par] = (m_id, depth + 1)
+                                if par in visited_b:
+                                    intersect_node = par
+                                    break
+                                next_frontier_a.add(par)
+                    if intersect_node is not None: break
+                
+                if intersect_node is None:
+                    # 对于查询子女的行，邻居是该子节点本身，它的连接点是对应的父亲或母亲
+                    for r in children_rows:
+                        c_id, f_id, mo_id = r
+                        # 判断是通过哪一方连接的
+                        for p_id in (f_id, mo_id):
+                            if p_id in frontier_a:
+                                if c_id not in visited_a:
+                                    visited_a[c_id] = (p_id, depth + 1)
+                                    if c_id in visited_b:
+                                        intersect_node = c_id
+                                        break
+                                    next_frontier_a.add(c_id)
+                        if intersect_node is not None: break
+
+            frontier_a = next_frontier_a
+            if intersect_node is not None:
+                break
+
+        # ================== 扩展 B 侧 ==================
+        if frontier_b:
+            next_frontier_b = set()
+            if frontier_b:
+                query_ids = tuple(frontier_b)
+                rows = db.execute(
+                    text(f"SELECT member_id, father_id, mother_id FROM members WHERE member_id IN :q_ids"),
+                    {"q_ids": query_ids}
+                ).fetchall()
+                children_rows = db.execute(
+                    text(f"SELECT member_id, father_id, mother_id FROM members WHERE father_id IN :q_ids OR mother_id IN :q_ids"),
+                    {"q_ids": query_ids}
+                ).fetchall()
+                
+                for r in rows:
+                    m_id, f_id, mo_id = r
+                    for par in (f_id, mo_id):
+                        if par is not None:
+                            if par not in visited_b:
+                                visited_b[par] = (m_id, depth + 1)
+                                if par in visited_a:
+                                    intersect_node = par
+                                    break
+                                next_frontier_b.add(par)
+                    if intersect_node is not None: break
+                
+                if intersect_node is None:
+                    for r in children_rows:
+                        c_id, f_id, mo_id = r
+                        for p_id in (f_id, mo_id):
+                            if p_id in frontier_b:
+                                if c_id not in visited_b:
+                                    visited_b[c_id] = (p_id, depth + 1)
+                                    if c_id in visited_a:
+                                        intersect_node = c_id
+                                        break
+                                    next_frontier_b.add(c_id)
+                        if intersect_node is not None: break
+
+            frontier_b = next_frontier_b
+            if intersect_node is not None:
+                break
+
+    if intersect_node is None:
         return None
 
-    visited = {id_a: None}
-    queue = deque([id_a])
+    # 重建路径
+    path_a = []
+    node = intersect_node
+    while node is not None:
+        path_a.append(node)
+        node = visited_a[node][0]
+    path_a = list(reversed(path_a))
 
-    while queue:
-        cur = queue.popleft()
-        for nb in graph.get(cur, []):
-            if nb not in visited:
-                visited[nb] = cur
-                if nb == id_b:
-                    path = []
-                    node = id_b
-                    while node is not None:
-                        path.append(node)
-                        node = visited[node]
-                    return list(reversed(path))
-                queue.append(nb)
-    return None
+    path_b = []
+    node = visited_b[intersect_node][0]
+    while node is not None:
+        path_b.append(node)
+        node = visited_b[node][0]
+
+    return path_a + path_b
 
 
 # ── 路径标注 ─────────────────────────────────────────────
@@ -143,7 +225,6 @@ def find_relationship(db, name_a: str, name_b: str,
     # 同族配对优先；跨族直接判定无亲缘
     best_path = None
     best_a = best_b = None
-    _graph_cache: dict[int, dict] = {}  # clan_id -> graph，避免同族多次查询
 
     for ca in cands_a:
         for cb in cands_b:
@@ -152,12 +233,7 @@ def find_relationship(db, name_a: str, name_b: str,
             if ca["clan_id"] != cb["clan_id"]:
                 continue  # 不同族谱必然无亲缘
 
-            cid = ca["clan_id"]
-            if cid not in _graph_cache:
-                _graph_cache[cid] = _build_graph(db, cid)
-            graph = _graph_cache[cid]
-
-            path = _bfs_in_graph(graph, ca["member_id"], cb["member_id"])
+            path = _bfs_in_db(db, ca["member_id"], cb["member_id"])
             if path and (best_path is None or len(path) < len(best_path)):
                 best_path = path
                 best_a, best_b = ca, cb

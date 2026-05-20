@@ -6,8 +6,8 @@ def generate_genealogy_data():
     members = []
 
     clans = [
-        {"id": 1, "size": 55000, "gens": 30},
-        *[{"id": i, "size": 5000, "gens": 15} for i in range(2, 11)]
+        {"id": 1, "size": 60000, "gens": 30},
+        *[{"id": i, "size": 6000, "gens": 15} for i in range(2, 11)]
     ]
 
     global_member_id = 1
@@ -22,9 +22,11 @@ def generate_genealogy_data():
         # 第一代（始祖）
         for _ in range(max(2, avg_per_gen // 10)):
             gender = random.choice(['M', 'F'])
+            birth = 1000 + random.randint(-5, 5)
+            death = birth + random.randint(40, 90)
             members.append([global_member_id, clan_id,
-                            f"祖_{clan_id}_{global_member_id}",
-                            gender, None, None, 1, "始祖"])
+                            f"始祖_{clan_id}_{global_member_id}",
+                            gender, birth, death, None, None, 1, "始祖"])
             generation_pools[1][gender].append(global_member_id)
             global_member_id += 1
 
@@ -60,8 +62,8 @@ def generate_genealogy_data():
                     birth  = 1000 + (g - 1) * 30 + random.randint(-5, 5)
                     death  = birth + random.randint(40, 90)
                     members.append([global_member_id, clan_id,
-                                    f"名_{clan_id}_{global_member_id}",
-                                    gender, f_id, m_id, g, f"第{g}代成员"])
+                                    f"后_{clan_id}_{global_member_id}",
+                                    gender, birth, death, f_id, m_id, g, f"第{g}代成员"])
                     generation_pools[g][gender].append(global_member_id)
                     global_member_id += 1
 
@@ -75,10 +77,10 @@ if __name__ == "__main__":
 
     df = pd.DataFrame(all_members,
                       columns=['member_id', 'clan_id', 'name', 'gender',
-                               'father_id', 'mother_id', 'generation_num', 'bio'])
+                               'birth_year', 'death_year', 'father_id', 'mother_id', 'generation_num', 'bio'])
     df['father_id']  = df['father_id'].astype('Int64')
     df['mother_id']  = df['mother_id'].astype('Int64')
     df['member_id']  = df['member_id'].astype('Int64')
 
-    df.to_csv("members_load.csv", index=False, header=False)
+    df.to_csv("members_load.csv", index=False, header=False, encoding="utf-8")
     print(f"成功生成 {len(df)} 条成员数据，耗时: {time.time() - start:.2f} 秒")

@@ -34,7 +34,8 @@ CREATE TABLE members (
     father_id BIGINT REFERENCES members(member_id),
     mother_id BIGINT REFERENCES members(member_id),
     generation_num INT,
-    bio TEXT
+    bio TEXT,
+    id_pic TEXT
 );
 
 -- 5. 创建索引优化性能
