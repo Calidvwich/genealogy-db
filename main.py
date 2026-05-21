@@ -603,23 +603,42 @@ async def index(request: Request):
 
                 // 点击成员名字加载族谱树，同时记录 clanId
                 async function loadTree(id, clanId) {{
-                    currentClanId = clanId;
-                    const res = await fetch(`/members/${{id}}/ancestors`);
-                    const list = await res.json();
-                    const treeData = buildHierarchy(list, id);
-                    myChart.setOption({{
-                        series: [{{ type: 'tree', data: [treeData], label: {{ position: 'right' }} }}]
-                    }});
-                    // 同步更新当前权限
-                    const pRes = await fetch(`/permissions/check/${{clanId}}`);
-                    currentPerm = await pRes.json();
+                    try {{
+                        currentClanId = clanId;
+                        const res = await fetch(`/members/${{id}}/ancestors`);
+                        if (!res.ok) {{
+                            console.error('loadTree: /members/{id}/ancestors 返回错误', res.status);
+                            return;
+                        }}
+                        const list = await res.json();
+                        const treeData = buildHierarchy(list, id);
 
-                    // 创建者才显示导航栏「管理协作者」按钮
-                    const collabBtn = document.getElementById('btn-collab-current');
-                    collabBtn.style.display = currentPerm.is_owner ? 'inline-block' : 'none';
+                        if (!treeData) {{
+                            // 清空图表并给出提示（数据可能不全）
+                            myChart.setOption({{ series: [] }});
+                            console.warn('loadTree: 无法构建树数据，可能缺少成员或父母信息', id, list);
+                        }} else {{
+                            if (!myChart) myChart = echarts.init(document.getElementById('chart-container'));
+                            myChart.setOption({{
+                                series: [{{ type: 'tree', data: [treeData], label: {{ position: 'right' }} }}]
+                            }});
+                            // 确保图表在容器尺寸变化后能正确渲染
+                            setTimeout(() => {{ try {{ myChart.resize(); }} catch(e) {{}} }}, 50);
+                        }}
 
-                    // 数据概览切换为当前族谱统计
-                    updateDashboard(clanId);
+                        // 同步更新当前权限
+                        const pRes = await fetch(`/permissions/check/${{clanId}}`);
+                        if (pRes.ok) currentPerm = await pRes.json();
+
+                        // 创建者才显示导航栏「管理协作者」按钮
+                        const collabBtn = document.getElementById('btn-collab-current');
+                        if (collabBtn) collabBtn.style.display = currentPerm.is_owner ? 'inline-block' : 'none';
+
+                        // 数据概览切换为当前族谱统计
+                        updateDashboard(clanId);
+                    }} catch (e) {{
+                        console.error('loadTree 错误', e);
+                    }}
                 }}
 
                 function buildHierarchy(list, id) {{
@@ -1931,7 +1950,7 @@ def query_spouse_children(name: str):
             # 配偶（通过共同出现的儿女的父母字段推导）
             spouses = db.execute(text("""
                 WITH target AS (
-                    SELECT :mid::BIGINT AS mid
+                    SELECT CAST(:mid AS BIGINT) AS mid
                 ),
                 children_of_target AS (
                     SELECT member_id, father_id, mother_id

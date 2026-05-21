@@ -13,11 +13,20 @@
 1.2 建模相关：
     E-R图（实体，属性，对应关系）
     关系模式转换：关系表，范式级别
+    user: BCNF。字段不可再分（1NF），所有其他属性都是候选键，非主属性只依赖主键
+    genealogies：BCNF。主键为单属性，非主属性 title（家谱名称）、surname（姓氏）、revised_at（修订时间）都直接依赖且仅依赖于 clan_id
+    members: 3NF。
+    collaborations: BCNF 该表没有任何非主属性。所有的属性都是主属性的一部分，因此天然不存在部分依赖或传递依赖。
     约束设计：主键外键和CHECK约束
+    主键和外键见property.md
+    check:CHECK (gender IN ('M', 'F', 'U'));(性别就三种)
+    CHECK (death_year >= birth_year);（出生早于死亡）
+    CHECK (member_id <> father_id AND member_id <> mother_id);（自己不是自己的父母）
+    CHECK (length(trim(user_id)) >= 4);（避免账号过长）
 
 1.3 数据导入和导出：
     数据生成脚本√
-    使用COPY将CSV数据批量导入数据库/导出某分支
+    使用COPY将CSV数据批量导入数据库/导出某分支√
 
 1.4 SQL：
     基本查询：查询某个人所有的子女和配偶√
