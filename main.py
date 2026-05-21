@@ -1814,15 +1814,22 @@ def add_member(
         generation_num = 1
         
         if father_name:
-            fs = db.execute(text("SELECT member_id, generation_num FROM members WHERE name = :n AND clan_id = :c AND gender = 'M'"), {"n": father_name, "c": clan_id}).fetchall()
-            if fs:
-                father_id = fs[0][0]
-                generation_num = max(generation_num, (fs[0][1] or 0) + 1)
+            fs_all = db.execute(text("SELECT member_id, generation_num, gender FROM members WHERE name = :n AND clan_id = :c"), {"n": father_name, "c": clan_id}).fetchall()
+            if fs_all:
+                males = [r for r in fs_all if r[2] == 'M']
+                if not males:
+                    raise HTTPException(status_code=400, detail="父亲的性别必须为男")
+                father_id = males[0][0]
+                generation_num = max(generation_num, (males[0][1] or 0) + 1)
+
         if mother_name:
-            ms = db.execute(text("SELECT member_id, generation_num FROM members WHERE name = :n AND clan_id = :c AND gender = 'F'"), {"n": mother_name, "c": clan_id}).fetchall()
-            if ms:
-                mother_id = ms[0][0]
-                generation_num = max(generation_num, (ms[0][1] or 0) + 1)
+            ms_all = db.execute(text("SELECT member_id, generation_num, gender FROM members WHERE name = :n AND clan_id = :c"), {"n": mother_name, "c": clan_id}).fetchall()
+            if ms_all:
+                females = [r for r in ms_all if r[2] == 'F']
+                if not females:
+                    raise HTTPException(status_code=400, detail="母亲的性别必须为女")
+                mother_id = females[0][0]
+                generation_num = max(generation_num, (females[0][1] or 0) + 1)
 
         by = int(birth_year) if birth_year.strip() else None
         dy = int(death_year) if death_year.strip() else None
@@ -2027,5 +2034,37 @@ def query_early_birth(clan_id: int = None):
             ORDER BY m.clan_id, m.generation_num, m.birth_year
         """), params).fetchall()
         return [dict(r._mapping) for r in rows]
+    finally:
+        db.close()
+
+
+@app.get("/api/query/great_grandchildren")
+def query_great_grandchildren(member_id: int):
+    """查询某个曾祖父的所有曾孙 (四代查询)"""
+    db = SessionLocal()
+    try:
+        rows = db.execute(text("""
+            WITH RECURSIVE descendants AS (
+                -- 第1代：作为起点
+                SELECT member_id, 1 AS depth
+                FROM members
+                WHERE member_id = :mid
+                
+                UNION ALL
+                
+                -- 递归查询下一代
+                SELECT m.member_id, d.depth + 1
+                FROM members m
+                JOIN descendants d ON m.father_id = d.member_id OR m.mother_id = d.member_id
+                WHERE d.depth < 4
+            )
+            SELECT m.member_id, m.name, m.gender, m.generation_num, m.birth_year
+            FROM descendants d
+            JOIN members m ON d.member_id = m.member_id
+            WHERE d.depth = 4
+        """), {"mid": member_id}).fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()

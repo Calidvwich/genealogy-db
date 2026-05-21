@@ -218,6 +218,33 @@ WHERE m.gender = 'M'
 ORDER BY m.birth_year ASC;
 
 
+-- ── 4.5 四代查询：查询某个曾祖父的所有曾孙 ──────
+-- 说明：给定某个成员 ID (即曾祖父/曾祖母，第1代)，查询其第4代后代（曾孙辈）
+WITH RECURSIVE descendants AS (
+    -- 1) 初始条件：将起始成员作为第 1 代
+    SELECT
+        member_id,
+        1 AS depth
+    FROM members
+    WHERE member_id = :start_member_id  -- ← 替换要查询的曾祖父/曾祖母 ID
+    
+    UNION ALL
+    
+    -- 2) 递归条件：从第 i 代寻找子女 (第 i+1 代)
+    SELECT
+        m.member_id,
+        d.depth + 1
+    FROM members m
+    JOIN descendants d ON m.father_id = d.member_id OR m.mother_id = d.member_id
+    WHERE d.depth < 4
+)
+-- 3) 最终筛选第 4 代 (即曾孙辈)
+SELECT m.member_id, m.name, m.gender, m.generation_num, m.birth_year
+FROM descendants d
+JOIN members m ON d.member_id = m.member_id
+WHERE d.depth = 4;
+
+
 4.5 找出出生年份早于本代平均出生年份的所有成员
 按 (clan_id, generation_num) 分组，计算每代平均出生年，
 然后找出个人出生年 < 该代平均出生年的成员
