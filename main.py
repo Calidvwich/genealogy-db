@@ -146,8 +146,8 @@ async def index(request: Request):
             <!-- 主界面 -->
             <div id="adminContent">
                 <div class="navbar">
-                    <div style="font-weight:bold; color:var(--primary); font-size: 1.2rem;">武大族谱系统 - 管理后台</div>
-                    <div style="color: #64748b; font-size: 13px;">计算机学院 弘毅班 | 已登录</div>
+                    <div style="font-weight:bold; color:var(--primary); font-size: 1.2rem;">族谱管理系统</div>
+                        <div style="color: #64748b; font-size: 13px;">{session_user or '访客'} | 已登录</div>
                     <div style="display:flex; gap:8px; align-items:center;">
                         <label class="mode-switch" title="开启后显示SQL执行性能指标">
                             <input type="checkbox" id="perfModeToggle">
@@ -252,7 +252,18 @@ async def index(request: Request):
                     <input type="number" id="edit_death" placeholder="如 2050">
                     <label>简介</label>
                     <input type="text" id="edit_bio" placeholder="简短描述">
-                    <div id="editMsg" style="font-size:13px; min-height:18px; color:var(--danger);"></div>
+
+                    <!-- 亲属关系（有编辑权限时显示） -->
+                    <div id="parent-section" style="display:none; margin-top:10px; padding-top:10px; border-top:1px solid #f1f5f9;">
+                        <div style="font-size:13px; font-weight:600; color:#1e293b; margin-bottom:8px;">👪 亲属关系</div>
+                        <div style="font-size:11px; color:#94a3b8; margin-bottom:8px;">必须是同族谱成员姓名且唯一，留空表示清除该关系</div>
+                        <label>父亲姓名</label>
+                        <input type="text" id="edit_father" placeholder="可留空">
+                        <label>母亲姓名</label>
+                        <input type="text" id="edit_mother" placeholder="可留空">
+                    </div>
+
+                    <div id="editMsg" style="font-size:13px; min-height:18px; color:var(--danger); margin-top:6px;"></div>
 
                     <!-- 婚姻管理（有编辑权限时显示） -->
                     <div id="marriage-section" style="display:none; margin-top:14px; padding-top:12px; border-top:1px solid #f1f5f9;">
@@ -673,6 +684,15 @@ async def index(request: Request):
                     preview.style.background = 'none';
                     // 清空文件输入，避免残留
                     document.getElementById('edit_pic_input').value = '';
+                    // 亲属关系区域：有权限则显示并回填
+                    const parentSec = document.getElementById('parent-section');
+                    if (currentPerm && currentPerm.can_edit) {{
+                        parentSec.style.display = 'block';
+                        document.getElementById('edit_father').value = m.father_name || '';
+                        document.getElementById('edit_mother').value = m.mother_name || '';
+                    }} else {{
+                        parentSec.style.display = 'none';
+                    }}
                     // 婚姻区域：有权限则显示
                     const marriageSec = document.getElementById('marriage-section');
                     if (currentPerm && currentPerm.can_edit) {{
@@ -732,6 +752,11 @@ async def index(request: Request):
                     formData.append('birth_year', document.getElementById('edit_birth').value);
                     formData.append('death_year', document.getElementById('edit_death').value);
                     formData.append('bio', document.getElementById('edit_bio').value);
+                    // 父母字段（有权限时才存在于 DOM）
+                    const fatherEl = document.getElementById('edit_father');
+                    const motherEl = document.getElementById('edit_mother');
+                    if (fatherEl) formData.append('father_name', fatherEl.value);
+                    if (motherEl) formData.append('mother_name', motherEl.value);
                     const res = await fetch(`/members/${{memberId}}/update`, {{ method: 'POST', body: formData }});
                     const data = await res.json();
                     if (res.status === 401) {{
@@ -1417,7 +1442,7 @@ def get_member_detail(member_id: int):
     db = SessionLocal()
     try:
         row = db.execute(
-            text("SELECT member_id, clan_id, name, gender, birth_year, death_year, bio, id_pic FROM members WHERE member_id = :mid"),
+            text("SELECT member_id, clan_id, name, gender, birth_year, death_year, bio, id_pic, father_id, mother_id FROM members WHERE member_id = :mid"),
             {"mid": member_id}
         ).fetchone()
         if not row:
@@ -1425,6 +1450,17 @@ def get_member_detail(member_id: int):
         res = dict(row._mapping)
         if not res.get("id_pic"):
             res["id_pic"] = DEFAULT_PIC_DATA_URI
+        # 查父母姓名，供前端回填
+        if res.get("father_id"):
+            f = db.execute(text("SELECT name FROM members WHERE member_id = :mid"), {"mid": res["father_id"]}).fetchone()
+            res["father_name"] = f[0] if f else ""
+        else:
+            res["father_name"] = ""
+        if res.get("mother_id"):
+            m = db.execute(text("SELECT name FROM members WHERE member_id = :mid"), {"mid": res["mother_id"]}).fetchone()
+            res["mother_name"] = m[0] if m else ""
+        else:
+            res["mother_name"] = ""
         return res
     finally:
         db.close()
@@ -1461,7 +1497,9 @@ def update_member(
     gender: str = Form(...),
     birth_year: str = Form(""),
     death_year: str = Form(""),
-    bio: str = Form("")
+    bio: str = Form(""),
+    father_name: str = Form(""),
+    mother_name: str = Form("")
 ):
     current_user = request.cookies.get("session_user")
     if not current_user:
@@ -1483,44 +1521,123 @@ def update_member(
         if not row:
             raise HTTPException(status_code=404, detail="成员不存在")
 
+        clan_id = row[0]
+
         # ── 权限检查 ──
-        if not check_edit_permission(db, row[0], current_user):
+        if not check_edit_permission(db, clan_id, current_user):
             raise HTTPException(status_code=403, detail="无编辑权限，请联系族谱创建者授权")
+
+        # ── 解析父母 ID（含性别校验，支持姓名或 member_id 数字）──
+        def resolve_parent(raw: str, role: str, required_gender: str) -> int:
+            val = raw.strip()
+            if val.isdigit():
+                pid = int(val)
+                if pid == member_id:
+                    raise HTTPException(status_code=400, detail=f"不能将自己设为{role}")
+                row_p = db.execute(
+                    text("SELECT member_id, clan_id, gender FROM members WHERE member_id = :pid"),
+                    {"pid": pid}
+                ).fetchone()
+                if not row_p:
+                    raise HTTPException(status_code=404, detail=f"找不到 member_id={pid} 的成员")
+                if row_p[1] != clan_id:
+                    raise HTTPException(status_code=400, detail=f"member_id={pid} 不属于当前族谱(clan_id={clan_id})")
+                if row_p[2] and row_p[2] != required_gender:
+                    gender_label = "男" if required_gender == "M" else "女"
+                    raise HTTPException(status_code=400, detail=f"{role}性别必须为{gender_label}，该成员性别不符")
+                return pid
+            candidates = db.execute(
+                text("SELECT member_id, gender FROM members WHERE name = :n AND clan_id = :cid AND member_id != :mid"),
+                {"n": val, "cid": clan_id, "mid": member_id}
+            ).fetchall()
+            if not candidates:
+                anywhere = db.execute(
+                    text("SELECT clan_id FROM members WHERE name = :n LIMIT 5"),
+                    {"n": val}
+                ).fetchall()
+                hint = f"；该名字存在于族谱 {[r[0] for r in anywhere]}，但不在当前族谱(clan_id={clan_id})" if anywhere else ""
+                raise HTTPException(status_code=404, detail=f"同族谱中找不到{role} [{val}]{hint}")
+            if len(candidates) > 1:
+                raise HTTPException(status_code=400, detail=f"{role}姓名 [{val}] 对应多个成员，请直接输入 member_id 数字")
+            pid, gender = candidates[0]
+            if gender and gender != required_gender:
+                gender_label = "男" if required_gender == "M" else "女"
+                raise HTTPException(status_code=400, detail=f"{role}性别必须为{gender_label}，[{val}] 的性别不符")
+            return pid
+
+        new_father_id = None
+        new_mother_id = None
+
+        if father_name and father_name.strip():
+            new_father_id = resolve_parent(father_name, "父亲", "M")
+
+        if mother_name and mother_name.strip():
+            new_mother_id = resolve_parent(mother_name, "母亲", "F")
+
+        # ── 出生年份校验（使用新父母 ID，若未传则沿用旧值）──
+        effective_father_id = new_father_id if father_name.strip() else row[1]
+        effective_mother_id = new_mother_id if mother_name.strip() else row[2]
 
         by = int(birth_year) if birth_year and birth_year.strip() else None
         if by is not None:
-            # 检查是否早于父母的出生年份
-            if row[1]:  # father_id
-                f_birth = db.execute(text("SELECT birth_year FROM members WHERE member_id = :fid"), {"fid": row[1]}).fetchone()
+            if effective_father_id:
+                f_birth = db.execute(text("SELECT birth_year FROM members WHERE member_id = :fid"), {"fid": effective_father_id}).fetchone()
                 if f_birth and f_birth[0] is not None and by <= f_birth[0]:
                     raise HTTPException(status_code=400, detail="成员的出生年份不能早于或等于父亲的出生年份")
-            if row[2]:  # mother_id
-                m_birth = db.execute(text("SELECT birth_year FROM members WHERE member_id = :mid"), {"mid": row[2]}).fetchone()
+            if effective_mother_id:
+                m_birth = db.execute(text("SELECT birth_year FROM members WHERE member_id = :fid"), {"fid": effective_mother_id}).fetchone()
                 if m_birth and m_birth[0] is not None and by <= m_birth[0]:
                     raise HTTPException(status_code=400, detail="成员的出生年份不能早于或等于母亲的出生年份")
-            
-            # 检查是否晚于子女的出生年份
-            children_births = db.execute(text("SELECT birth_year FROM members WHERE (father_id = :mid OR mother_id = :mid) AND birth_year IS NOT NULL"), {"mid": member_id}).fetchall()
+            children_births = db.execute(
+                text("SELECT birth_year FROM members WHERE (father_id = :mid OR mother_id = :mid) AND birth_year IS NOT NULL"),
+                {"mid": member_id}
+            ).fetchall()
             for cb in children_births:
                 if by >= cb[0]:
                     raise HTTPException(status_code=400, detail="成员的出生年份不能晚于或等于子女的出生年份")
 
+        # ── 构建 UPDATE，父母字段仅在有传值时更新 ──
+        set_clauses = [
+            "name = :name",
+            "gender = :gender",
+            "birth_year = NULLIF(:birth, '')::INT",
+            "death_year = NULLIF(:death, '')::INT",
+            "bio = :bio",
+        ]
+        params = {
+            "name": name, "gender": gender,
+            "birth": birth_year, "death": death_year,
+            "bio": bio, "mid": member_id
+        }
+
+        # 父亲：传了名字就更新（传空字符串表示清空）
+        if father_name is not None:
+            set_clauses.append("father_id = :father_id")
+            params["father_id"] = new_father_id  # None = 清空
+
+        # 母亲同理
+        if mother_name is not None:
+            set_clauses.append("mother_id = :mother_id")
+            params["mother_id"] = new_mother_id
+
         db.execute(
-            text("""
-                UPDATE members SET
-                    name = :name,
-                    gender = :gender,
-                    birth_year = NULLIF(:birth, '')::INT,
-                    death_year = NULLIF(:death, '')::INT,
-                    bio = :bio
-                WHERE member_id = :mid
-            """),
-            {
-                "name": name, "gender": gender,
-                "birth": birth_year, "death": death_year,
-                "bio": bio, "mid": member_id
-            }
+            text(f"UPDATE members SET {', '.join(set_clauses)} WHERE member_id = :mid"),
+            params
         )
+
+        # ── 同步父母婚姻记录 ──────────────────────────────────────
+        # 取更新后的实际父母 ID
+        final_father_id = new_father_id if father_name is not None else row[1]
+        final_mother_id = new_mother_id if mother_name is not None else row[2]
+        _ensure_marriage(db, final_father_id, final_mother_id, clan_id)
+
+        # ── 清理旧父母的婚姻记录 ──────────────────────────────────
+        old_father_id = row[1]
+        old_mother_id = row[2]
+        if old_father_id and old_mother_id:
+            if old_father_id != final_father_id or old_mother_id != final_mother_id:
+                _cleanup_marriage(db, old_father_id, old_mother_id, clan_id)
+
         db.commit()
         return {"message": "修改成功"}
     except HTTPException:
@@ -1581,7 +1698,7 @@ def delete_member(member_id: int, request: Request):
     db = SessionLocal()
     try:
         row = db.execute(
-            text("SELECT clan_id FROM members WHERE member_id = :mid"),
+            text("SELECT clan_id, father_id, mother_id FROM members WHERE member_id = :mid"),
             {"mid": member_id}
         ).fetchone()
         if not row:
@@ -1592,6 +1709,11 @@ def delete_member(member_id: int, request: Request):
             raise HTTPException(status_code=403, detail="无编辑权限，请联系族谱创建者授权")
 
         db.execute(text("DELETE FROM members WHERE member_id = :mid"), {"mid": member_id})
+        
+        # ── 清理父母的婚姻记录 ──────────────────────────────────
+        if row[1] and row[2]:
+            _cleanup_marriage(db, row[1], row[2], row[0])
+
         db.commit()
         return {"message": "删除成功"}
     except HTTPException:
@@ -1652,6 +1774,57 @@ async def upload_member_pic(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
+
+# =============================================================
+# 父母婚姻关系同步工具函数
+# =============================================================
+
+def _ensure_marriage(db, father_id, mother_id, clan_id):
+    """
+    确保 father_id 和 mother_id 之间存在婚姻记录。
+    - 若已有未离婚记录则跳过。
+    - 若无则自动创建（marry_year=NULL）。
+    仅在两者都不为 None 时执行。
+    """
+    if not father_id or not mother_id:
+        return
+    existing = db.execute(text("""
+        SELECT 1 FROM marriages
+        WHERE ((spouse_a_id = :a AND spouse_b_id = :b)
+            OR (spouse_a_id = :b AND spouse_b_id = :a))
+          AND divorce_year IS NULL
+    """), {"a": father_id, "b": mother_id}).fetchone()
+    if not existing:
+        db.execute(text("""
+            INSERT INTO marriages (spouse_a_id, spouse_b_id, marry_year, clan_id)
+            VALUES (:a, :b, NULL, :cid)
+        """), {"a": father_id, "b": mother_id, "cid": clan_id})
+
+
+def _cleanup_marriage(db, father_id, mother_id, clan_id):
+    """
+    检查 father_id 和 mother_id 之间是否还存在其他共同子女。
+    如果不存在，且两人的婚姻记录是自动创建的（marry_year IS NULL 且 divorce_year IS NULL），
+    则自动删除该婚姻记录。
+    """
+    if not father_id or not mother_id:
+        return
+    has_children = db.execute(text("""
+        SELECT 1 FROM members
+        WHERE father_id = :fid AND mother_id = :mid
+        LIMIT 1
+    """), {"fid": father_id, "mid": mother_id}).fetchone()
+    
+    if not has_children:
+        db.execute(text("""
+            DELETE FROM marriages
+            WHERE ((spouse_a_id = :fid AND spouse_b_id = :mid)
+                OR (spouse_a_id = :mid AND spouse_b_id = :fid))
+              AND marry_year IS NULL
+              AND divorce_year IS NULL
+        """), {"fid": father_id, "mid": mother_id})
+
 
 # =============================================================
 # marriages 表相关接口
@@ -1721,13 +1894,60 @@ def add_marriage(
         if existing:
             raise HTTPException(status_code=400, detail="两人已有有效婚姻记录")
 
+        # ── 性别推断：一方已知则推断另一方，有矛盾则回退 ──
+        gender_rows = db.execute(
+            text("SELECT member_id, gender FROM members WHERE member_id IN :ids"),
+            {"ids": (member_id, spouse_id)}
+        ).fetchall()
+        genders = {r[0]: r[1] or None for r in gender_rows}
+        g_self   = genders.get(member_id)
+        g_spouse = genders.get(spouse_id)
+
+        infer_id     = None
+        infer_gender = None
+        if g_self and not g_spouse:
+            infer_id, infer_gender = spouse_id, ('F' if g_self == 'M' else 'M')
+        elif g_spouse and not g_self:
+            infer_id, infer_gender = member_id, ('F' if g_spouse == 'M' else 'M')
+
+        if infer_id and infer_gender:
+            expected_spouse_gender = 'F' if infer_gender == 'M' else 'M'
+            conflict = db.execute(text("""
+                SELECT sp.member_id FROM marriages mg
+                JOIN members sp ON sp.member_id =
+                    CASE WHEN mg.spouse_a_id = :iid THEN mg.spouse_b_id ELSE mg.spouse_a_id END
+                WHERE (mg.spouse_a_id = :iid OR mg.spouse_b_id = :iid)
+                  AND sp.gender IS NOT NULL AND sp.gender != ''
+                  AND sp.gender != :esg
+                LIMIT 1
+            """), {"iid": infer_id, "esg": expected_spouse_gender}).fetchone()
+            if conflict:
+                gender_label = "男" if infer_gender == 'M' else "女"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"性别推断冲突：根据配偶性别推断该成员应为{gender_label}，"
+                           f"但其已有婚姻记录中存在矛盾，请先手动确认性别后再登记"
+                )
+            db.execute(
+                text("UPDATE members SET gender = :g WHERE member_id = :mid"),
+                {"g": infer_gender, "mid": infer_id}
+            )
+
         my = int(marry_year) if marry_year and marry_year.strip() else None
         db.execute(text("""
             INSERT INTO marriages (spouse_a_id, spouse_b_id, marry_year, clan_id)
             VALUES (:a, :b, :my, :cid)
         """), {"a": member_id, "b": spouse_id, "my": my, "cid": member[1]})
         db.commit()
-        return {"message": f"已成功登记与 [{spouse_name}] 的婚姻"}
+
+        infer_msg = ""
+        if infer_id and infer_gender:
+            label = "男" if infer_gender == "M" else "女"
+            name_row = db.execute(
+                text("SELECT name FROM members WHERE member_id = :mid"), {"mid": infer_id}
+            ).fetchone()
+            infer_msg = f"，已自动将 [{name_row[0] if name_row else infer_id}] 的性别确定为{label}"
+        return {"message": f"已成功登记与 [{spouse_name}] 的婚姻{infer_msg}"}
     except HTTPException:
         raise
     except Exception as e:
@@ -1866,28 +2086,42 @@ def add_member(
         father_id = None
         mother_id = None
         generation_num = 1
-        
+
         father_birth = None
-        if father_name:
-            fs_all = db.execute(text("SELECT member_id, generation_num, gender, birth_year FROM members WHERE name = :n AND clan_id = :c"), {"n": father_name, "c": clan_id}).fetchall()
-            if fs_all:
-                males = [r for r in fs_all if r[2] == 'M']
-                if not males:
-                    raise HTTPException(status_code=400, detail="父亲的性别必须为男")
-                father_id = males[0][0]
-                generation_num = max(generation_num, (males[0][1] or 0) + 1)
-                father_birth = males[0][3]
+        if father_name and father_name.strip():
+            fs_all = db.execute(
+                text("SELECT member_id, generation_num, gender, birth_year FROM members WHERE name = :n AND clan_id = :c"),
+                {"n": father_name.strip(), "c": clan_id}
+            ).fetchall()
+            if not fs_all:
+                raise HTTPException(status_code=404, detail=f"同族谱中找不到父亲 [{father_name}]")
+            # 允许性别未设定（None/空）或明确为男
+            valid = [r for r in fs_all if not r[2] or r[2] == 'M']
+            if not valid:
+                raise HTTPException(status_code=400, detail=f"父亲性别必须为男，[{father_name}] 的性别不符")
+            if len(valid) > 1:
+                raise HTTPException(status_code=400, detail=f"父亲姓名 [{father_name}] 对应多个成员，请直接输入 member_id 数字")
+            father_id = valid[0][0]
+            generation_num = max(generation_num, (valid[0][1] or 0) + 1)
+            father_birth = valid[0][3]
 
         mother_birth = None
-        if mother_name:
-            ms_all = db.execute(text("SELECT member_id, generation_num, gender, birth_year FROM members WHERE name = :n AND clan_id = :c"), {"n": mother_name, "c": clan_id}).fetchall()
-            if ms_all:
-                females = [r for r in ms_all if r[2] == 'F']
-                if not females:
-                    raise HTTPException(status_code=400, detail="母亲的性别必须为女")
-                mother_id = females[0][0]
-                generation_num = max(generation_num, (females[0][1] or 0) + 1)
-                mother_birth = females[0][3]
+        if mother_name and mother_name.strip():
+            ms_all = db.execute(
+                text("SELECT member_id, generation_num, gender, birth_year FROM members WHERE name = :n AND clan_id = :c"),
+                {"n": mother_name.strip(), "c": clan_id}
+            ).fetchall()
+            if not ms_all:
+                raise HTTPException(status_code=404, detail=f"同族谱中找不到母亲 [{mother_name}]")
+            # 允许性别未设定（None/空）或明确为女
+            valid = [r for r in ms_all if not r[2] or r[2] == 'F']
+            if not valid:
+                raise HTTPException(status_code=400, detail=f"母亲性别必须为女，[{mother_name}] 的性别不符")
+            if len(valid) > 1:
+                raise HTTPException(status_code=400, detail=f"母亲姓名 [{mother_name}] 对应多个成员，请直接输入 member_id 数字")
+            mother_id = valid[0][0]
+            generation_num = max(generation_num, (valid[0][1] or 0) + 1)
+            mother_birth = valid[0][3]
 
         by = int(birth_year) if birth_year.strip() else None
         
@@ -1908,6 +2142,10 @@ def add_member(
         """), {
             "mid": new_id, "cid": clan_id, "n": name, "g": gender, "by": by, "dy": dy, "bio": bio, "fid": father_id, "mid_parent": mother_id, "gen": generation_num
         })
+
+        # ── 同步父母婚姻记录 ──────────────────────────────────────
+        _ensure_marriage(db, father_id, mother_id, clan_id)
+
         db.commit()
         return {"message": "添加成员成功"}
     except Exception as e:
