@@ -317,6 +317,7 @@ async def index(request: Request):
                         <button id="qt-longevity" onclick="switchQueryTab('longevity')" style="font-size:11px; padding:4px 8px; border:1px solid #e2e8f0; border-radius:4px; background:#f8fafc;">最长寿一代</button>
                         <button id="qt-singles"   onclick="switchQueryTab('singles')"   style="font-size:11px; padding:4px 8px; border:1px solid #e2e8f0; border-radius:4px; background:#f8fafc;">50+单身男性</button>
                         <button id="qt-early"     onclick="switchQueryTab('early')"     style="font-size:11px; padding:4px 8px; border:1px solid #e2e8f0; border-radius:4px; background:#f8fafc;">早于均值出生</button>
+                        <button id="qt-descendants" onclick="switchQueryTab('descendants')" style="font-size:11px; padding:4px 8px; border:1px solid #e2e8f0; border-radius:4px; background:#f8fafc;">四代曾孙</button>
                     </div>
 
                     <!-- 配偶/子女 -->
@@ -354,6 +355,12 @@ async def index(request: Request):
                         </select>
                         <button class="btn-primary" onclick="runQuery('early')" style="width:100%; height:34px; font-size:13px; margin-bottom:8px;">查询</button>
                         <div id="qr-early" style="max-height:300px; overflow-y:auto;"></div>
+                    </div>
+                    <!-- 四代曾孙 -->
+                    <div id="qp-descendants" style="display:none;">
+                        <input type="text" id="q-descendants-name" placeholder="输入曾祖/曾祖母的成员姓名" style="margin-bottom:6px;">
+                        <button class="btn-primary" onclick="runQuery('descendants')" style="width:100%; height:34px; font-size:13px; margin-bottom:8px;">查询</button>
+                        <div id="qr-descendants" style="max-height:300px; overflow-y:auto;"></div>
                     </div>
 
                     <div class="modal-footer">
@@ -1077,7 +1084,7 @@ async def index(request: Request):
                 }}
 
                 function switchQueryTab(tab) {{
-                    ['spouse','ancestors','longevity','singles','early'].forEach(t => {{
+                    ['spouse','ancestors','longevity','singles','early','descendants'].forEach(t => {{
                         document.getElementById(`qp-${{t}}`).style.display = t === tab ? 'block' : 'none';
                         const btn = document.getElementById(`qt-${{t}}`);
                         if (t === tab) {{
@@ -1159,6 +1166,16 @@ async def index(request: Request):
                             ['姓名','族谱','代数','出生年','本代均值','早于均值(年)'],
                             data.map(r=>[r.name, r.clan_id, r.generation_num, r.birth_year, r.generation_avg, r.years_earlier]),
                             '无符合条件成员');
+                    }} else if (type === 'descendants') {{
+                        const name = document.getElementById('q-descendants-name').value.trim();
+                        if (!name) {{ resultEl.innerHTML = '<p style="color:var(--danger);font-size:12px;">请输入姓名</p>'; return; }}
+                        res = await fetch(`/api/query/great_grandchildren?name=${{encodeURIComponent(name)}}`);
+                        data = await res.json();
+                        if (!res.ok) {{ resultEl.innerHTML = `<p style="color:var(--danger);font-size:12px;">${{data.detail}}</p>`; return; }}
+                        resultEl.innerHTML = _table(
+                            ['姓名','性别','代数','出生年'],
+                            data.map(r=>[r.name, r.gender==='M'?'男':'女', r.generation_num, r.birth_year]),
+                            '无第四代（曾孙辈）记录');
                     }}
                 }}
 
@@ -1441,7 +1458,7 @@ def update_member(
     db = SessionLocal()
     try:
         row = db.execute(
-            text("SELECT clan_id FROM members WHERE member_id = :mid"),
+            text("SELECT clan_id, father_id, mother_id FROM members WHERE member_id = :mid"),
             {"mid": member_id}
         ).fetchone()
         if not row:
@@ -1450,6 +1467,24 @@ def update_member(
         # ── 权限检查 ──
         if not check_edit_permission(db, row[0], current_user):
             raise HTTPException(status_code=403, detail="无编辑权限，请联系族谱创建者授权")
+
+        by = int(birth_year) if birth_year and birth_year.strip() else None
+        if by is not None:
+            # 检查是否早于父母的出生年份
+            if row[1]:  # father_id
+                f_birth = db.execute(text("SELECT birth_year FROM members WHERE member_id = :fid"), {"fid": row[1]}).fetchone()
+                if f_birth and f_birth[0] is not None and by <= f_birth[0]:
+                    raise HTTPException(status_code=400, detail="成员的出生年份不能早于或等于父亲的出生年份")
+            if row[2]:  # mother_id
+                m_birth = db.execute(text("SELECT birth_year FROM members WHERE member_id = :mid"), {"mid": row[2]}).fetchone()
+                if m_birth and m_birth[0] is not None and by <= m_birth[0]:
+                    raise HTTPException(status_code=400, detail="成员的出生年份不能早于或等于母亲的出生年份")
+            
+            # 检查是否晚于子女的出生年份
+            children_births = db.execute(text("SELECT birth_year FROM members WHERE (father_id = :mid OR mother_id = :mid) AND birth_year IS NOT NULL"), {"mid": member_id}).fetchall()
+            for cb in children_births:
+                if by >= cb[0]:
+                    raise HTTPException(status_code=400, detail="成员的出生年份不能晚于或等于子女的出生年份")
 
         db.execute(
             text("""
@@ -1813,25 +1848,36 @@ def add_member(
         mother_id = None
         generation_num = 1
         
+        father_birth = None
         if father_name:
-            fs_all = db.execute(text("SELECT member_id, generation_num, gender FROM members WHERE name = :n AND clan_id = :c"), {"n": father_name, "c": clan_id}).fetchall()
+            fs_all = db.execute(text("SELECT member_id, generation_num, gender, birth_year FROM members WHERE name = :n AND clan_id = :c"), {"n": father_name, "c": clan_id}).fetchall()
             if fs_all:
                 males = [r for r in fs_all if r[2] == 'M']
                 if not males:
                     raise HTTPException(status_code=400, detail="父亲的性别必须为男")
                 father_id = males[0][0]
                 generation_num = max(generation_num, (males[0][1] or 0) + 1)
+                father_birth = males[0][3]
 
+        mother_birth = None
         if mother_name:
-            ms_all = db.execute(text("SELECT member_id, generation_num, gender FROM members WHERE name = :n AND clan_id = :c"), {"n": mother_name, "c": clan_id}).fetchall()
+            ms_all = db.execute(text("SELECT member_id, generation_num, gender, birth_year FROM members WHERE name = :n AND clan_id = :c"), {"n": mother_name, "c": clan_id}).fetchall()
             if ms_all:
                 females = [r for r in ms_all if r[2] == 'F']
                 if not females:
                     raise HTTPException(status_code=400, detail="母亲的性别必须为女")
                 mother_id = females[0][0]
                 generation_num = max(generation_num, (females[0][1] or 0) + 1)
+                mother_birth = females[0][3]
 
         by = int(birth_year) if birth_year.strip() else None
+        
+        if by is not None:
+            if father_birth is not None and by <= father_birth:
+                raise HTTPException(status_code=400, detail="子女的出生年份不能早于或等于父亲的出生年份")
+            if mother_birth is not None and by <= mother_birth:
+                raise HTTPException(status_code=400, detail="子女的出生年份不能早于或等于母亲的出生年份")
+
         dy = int(death_year) if death_year.strip() else None
 
         next_id_row = db.execute(text("SELECT COALESCE(MAX(member_id), 0) + 1 FROM members")).fetchone()
@@ -2039,10 +2085,16 @@ def query_early_birth(clan_id: int = None):
 
 
 @app.get("/api/query/great_grandchildren")
-def query_great_grandchildren(member_id: int):
+def query_great_grandchildren(name: str):
     """查询某个曾祖父的所有曾孙 (四代查询)"""
     db = SessionLocal()
     try:
+        # 先根据名字找到匹配的 member_id
+        m = db.execute(text("SELECT member_id FROM members WHERE name = :n LIMIT 1"), {"n": name}).fetchone()
+        if not m:
+            raise HTTPException(status_code=404, detail=f"找不到成员: {name}")
+        member_id = m[0]
+
         rows = db.execute(text("""
             WITH RECURSIVE descendants AS (
                 -- 第1代：作为起点
