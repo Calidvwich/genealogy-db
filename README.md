@@ -10,6 +10,12 @@
 
 第一次导入数据： python load.py
 
+完整导出整个数据库（生成项目根目录下的 genealogy_db_bck，内容为 SQL dump）：
+python export_db.py
+
+恢复到新的 PostgreSQL 数据库：
+psql -U postgres -d postgres -f genealogy_db_bck
+
 将数据导出 (备份):\copy (SELECT * FROM genealogies WHERE clan_id = 11) TO 'C:\Users\Lenovo\Desktop\genealogy\clan_11_meta.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
 
 \copy (SELECT * FROM members WHERE clan_id = 11) TO 'C:\Users\Lenovo\Desktop\genealogy\clan_11_members.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
