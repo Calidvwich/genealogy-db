@@ -1,3 +1,4 @@
+#本文件用于记录项目所有需求，无实际业务意义
 1.1 应用界面：
     用户登录√
     用户管理√
@@ -19,7 +20,8 @@
     collaborations: BCNF 该表没有任何非主属性。所有的属性都是主属性的一部分，因此天然不存在部分依赖或传递依赖。
     约束设计：主键外键和CHECK约束
     主键和外键见property.md
-    check:CHECK (gender IN ('M', 'F', 'U'));(性别就三种)
+    check:
+    CHECK (gender IN ('M', 'F', 'U'));(性别就三种)
     CHECK (death_year >= birth_year);（出生早于死亡）
     CHECK (member_id <> father_id AND member_id <> mother_id);（自己不是自己的父母）
     CHECK (length(trim(user_id)) >= 4);（避免账号过长）

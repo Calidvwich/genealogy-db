@@ -38,6 +38,23 @@ CREATE TABLE members (
     id_pic TEXT
 );
 
--- 5. 创建索引优化性能
+-- 5. 创建婚姻表
+CREATE TABLE marriages (
+    marriage_id SERIAL PRIMARY KEY,
+    clan_id INTEGER REFERENCES genealogies(clan_id),
+    spouse_a_id BIGINT REFERENCES members(member_id),
+    spouse_b_id BIGINT REFERENCES members(member_id),
+    marry_year INT,
+    divorce_year INT,
+    CONSTRAINT chk_marriages_distinct_spouses CHECK (spouse_a_id <> spouse_b_id),
+    CONSTRAINT chk_marriages_years CHECK (
+        marry_year IS NULL OR divorce_year IS NULL OR marry_year <= divorce_year
+    )
+);
+
+-- 6. 创建索引优化性能
 CREATE INDEX idx_members_father ON members(father_id);
 CREATE INDEX idx_members_clan_name ON members(clan_id, name);
+CREATE INDEX idx_marriages_spouse_a ON marriages(spouse_a_id);
+CREATE INDEX idx_marriages_spouse_b ON marriages(spouse_b_id);
+CREATE INDEX idx_marriages_clan ON marriages(clan_id);
