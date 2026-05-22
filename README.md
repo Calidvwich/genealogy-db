@@ -1,53 +1,28 @@
-创建环境：conda create --name genealogy python=3.12.13 -y
+本仓库用于存储本学期现代数据库课程的族谱管理项目。
 
-启动环境：conda activate genealogy
+不要修改 resources 文件夹及里面的 defaultpic.jpg。
 
-安装相关包：pip install -r requirements.txt
+运行前请先确认：
+1. 已安装并启动 PostgreSQL。
+2. 已安装 PostgreSQL 客户端工具，确保 `psql` 和 `pg_dump` 可以直接在命令行中使用。
+3. 数据库连接地址与代码中的默认配置一致，或自行修改为你的本地连接信息。
 
-运行网页程序：uvicorn main:app --reload
+建议按以下顺序执行：
 
-生成数据: python generate_data.py
+1. 创建环境：`conda create --name genealogy python=3.12.13 -y`
+2. 启动环境：`conda activate genealogy`
+3. 安装相关包：`pip install -r requirements.txt`
+4. 先执行 `init_db.sql` 初始化表结构，再导入数据。
+5. 生成数据：`python generate_data.py`
+6. 第一次导入数据：`python load_db.py`
+7. 运行网页程序：`uvicorn main:app --reload`
 
-第一次导入数据： python load.py
+补充说明：
+- 如果需要重新导出整个数据库，可执行 `python export_db.py`，会在项目根目录生成 `genealogy_db_bck`。
+- `generate_data.py` 会生成成员数据文件 `members_load.csv`，`load_db.py` 会把它导入数据库并补充婚姻关系。
+- 如果你只想导入已有数据，至少要先完成建库和建表，再运行导入脚本。
 
-完整导出整个数据库（生成项目根目录下的 genealogy_db_bck，内容为 SQL dump）：
-python export_db.py
 
-恢复到新的 PostgreSQL 数据库：
-psql -U postgres -d postgres -f genealogy_db_bck
 
-将数据导出 (备份):\copy (SELECT * FROM genealogies WHERE clan_id = 11) TO 'C:\Users\Lenovo\Desktop\genealogy\clan_11_meta.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
 
-\copy (SELECT * FROM members WHERE clan_id = 11) TO 'C:\Users\Lenovo\Desktop\genealogy\clan_11_members.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
-\copy (SELECT * FROM collaborations WHERE clan_id = 11) TO 'C:\Users\Lenovo\Desktop\genealogy\clan_11_collabs.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
-\copy (SELECT * FROM marriages WHERE clan_id = 11) TO 'C:/Users/Lenovo/Desktop/genealogy/clan_11_marriages.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
-将数据导入 (恢复):  
--- 0. 如果目标库已有 clan_id=11 的数据，先清除（注意顺序，子表先删）
-DELETE FROM marriages     WHERE clan_id = 11;
-DELETE FROM collaborations WHERE clan_id = 11;
-DELETE FROM members       WHERE clan_id = 11;
-DELETE FROM genealogies   WHERE clan_id = 11;
-
--- 1. 先导入 genealogies
-\copy genealogies FROM 'C:/Users/Lenovo/Desktop/genealogy/clan_11_meta.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
--- 2. 再导入 members
-\copy members FROM 'C:/Users/Lenovo/Desktop/genealogy/clan_11_members.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
--- 3. 导入 collaborations
-\copy collaborations FROM 'C:/Users/Lenovo/Desktop/genealogy/clan_11_collabs.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
--- 4. 最后导入 marriages
-\copy marriages FROM 'C:/Users/Lenovo/Desktop/genealogy/clan_11_marriages.csv' WITH (FORMAT CSV, HEADER, ENCODING 'UTF8');
-
-修复序列：
-SELECT setval('members_member_id_seq',   (SELECT MAX(member_id) FROM members));
-SELECT setval('genealogies_clan_id_seq', (SELECT MAX(clan_id)   FROM genealogies));
-SELECT setval('members_member_id_seq',   (SELECT MAX(member_id) FROM members));
-SELECT setval('genealogies_clan_id_seq', (SELECT MAX(clan_id)   FROM genealogies));
-SELECT creator_id FROM genealogies WHERE clan_id = 11;
-SELECT DISTINCT user_id FROM collaborations WHERE clan_id = 11;
 
